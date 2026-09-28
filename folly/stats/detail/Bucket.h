@@ -22,6 +22,7 @@
 #include <type_traits>
 
 #include <folly/ConstexprMath.h>
+#include <folly/lang/CheckedMath.h>
 
 namespace folly {
 namespace detail {
@@ -65,6 +66,73 @@ avgHelper(ValueType sum, uint64_t count) {
     return constexpr_clamp_cast<ReturnType>(sumf / countf);
   }
   return static_cast<ReturnType>(sumf / countf);
+}
+
+/*
+ * Computes value * count, clamping to the numeric limits of ValueType
+ * instead of overflowing. count may be any uint64_t, including values
+ * wider than ValueType.
+ *
+ * Floating point types have no overflow concern (the product relaxes to
+ * +/-inf), so they fall back to a plain multiply.
+ */
+template <typename ValueType>
+ValueType saturatingMultiply(ValueType value, uint64_t count) {
+  if constexpr (!std::is_integral<ValueType>::value) {
+    return value * static_cast<ValueType>(count);
+  } else if (count == 0 || value == ValueType(0)) {
+    return ValueType(0);
+  } else {
+    // A count wider than ValueType guarantees the product is out of range:
+    // |value| >= 1 means |value * count| > max. The one exception is a
+    // signed -1, whose product is merely negative, but still below min.
+    if constexpr (sizeof(ValueType) < sizeof(uint64_t)) {
+      if (count > uint64_t(std::numeric_limits<ValueType>::max())) {
+        return value < ValueType(0) ? std::numeric_limits<ValueType>::min()
+                                    : std::numeric_limits<ValueType>::max();
+      }
+    } else if (count > uint64_t(std::numeric_limits<ValueType>::max())) {
+      // 64-bit (or wider) ValueType: only count == 2^63 is representable,
+      // and only for signed types, where the product of -1 * 2^63 is min.
+      if constexpr (std::is_signed<ValueType>::value) {
+        if (count == uint64_t(1) << 63 && value == ValueType(-1)) {
+          return std::numeric_limits<ValueType>::min();
+        }
+      }
+      return value < ValueType(0) ? std::numeric_limits<ValueType>::min()
+                                  : std::numeric_limits<ValueType>::max();
+    }
+    const auto narrowCount = static_cast<ValueType>(count);
+    // folly::checked_mul is portable -- it only uses __builtin_mul_overflow
+    // behind FOLLY_HAS_BUILTIN and has a generic fallback -- but it accepts
+    // unsigned operands only, so multiply magnitudes and re-apply the sign.
+    using U = std::make_unsigned_t<ValueType>;
+    constexpr U kMax = static_cast<U>(std::numeric_limits<ValueType>::max());
+    const U magnitude = value < ValueType(0)
+        ? U(0) - static_cast<U>(value)
+        : static_cast<U>(value);
+    U product{};
+    if (!folly::checked_mul(
+            &product, magnitude, static_cast<U>(narrowCount))) {
+      // The magnitude of the product does not fit in ValueType at all.
+      return value < ValueType(0) ? std::numeric_limits<ValueType>::min()
+                                  : std::numeric_limits<ValueType>::max();
+    }
+    if constexpr (std::is_signed<ValueType>::value) {
+      if (value >= ValueType(0)) {
+        return product > kMax ? std::numeric_limits<ValueType>::max()
+                              : static_cast<ValueType>(product);
+      }
+      // A negative result may reach -min, whose magnitude is kMax + 1.
+      constexpr U kMinMag = kMax + U(1);
+      if (product >= kMinMag) {
+        return std::numeric_limits<ValueType>::min();
+      }
+      return static_cast<ValueType>(U(0) - product);
+    } else {
+      return static_cast<ValueType>(product);
+    }
+  }
 }
 
 // Helpers to add bucket counts and values without

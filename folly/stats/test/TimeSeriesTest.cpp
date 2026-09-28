@@ -1566,3 +1566,90 @@ TEST(MinuteHourTimeSeries, constReaders) {
     checkInvariant(mlts, now);
   }
 }
+
+// The aggregate passed to addValueAggregated is val * times; with a large
+// times count that product used to overflow in plain ValueType arithmetic.
+// It must clamp at the type limits instead, and the count must still be
+// recorded exactly.
+TEST(BucketedTimeSeries, AddValueLargeTimesSaturates) {
+  BucketedTimeSeries<int64_t> ts(60, seconds(600));
+
+  ts.addValue(seconds(0), INT64_MAX, 3);
+  EXPECT_EQ(3, ts.count());
+  EXPECT_EQ(INT64_MAX, ts.sum());
+
+  // A negative product clamps at the minimum.
+  BucketedTimeSeries<int64_t> tsNeg(60, seconds(600));
+  tsNeg.addValue(seconds(0), INT64_MIN, 2);
+  EXPECT_EQ(2, tsNeg.count());
+  EXPECT_EQ(INT64_MIN, tsNeg.sum());
+
+  // Narrow types: the count alone exceeds the representable range.
+  BucketedTimeSeries<int8_t> tsSmall(60, seconds(600));
+  tsSmall.addValue(seconds(0), int8_t(100), 1000);
+  EXPECT_EQ(1000, tsSmall.count());
+  EXPECT_EQ(INT8_MAX, tsSmall.sum());
+
+  // Unsigned types clamp at the maximum.
+  BucketedTimeSeries<uint8_t> tsUnsigned(60, seconds(600));
+  tsUnsigned.addValue(seconds(0), uint8_t(200), 1000);
+  EXPECT_EQ(1000, tsUnsigned.count());
+  EXPECT_EQ(UINT8_MAX, tsUnsigned.sum());
+
+  // times = 1 must reproduce the plain value.
+  BucketedTimeSeries<int64_t> tsSingle(60, seconds(600));
+  tsSingle.addValue(seconds(0), 42, 1);
+  EXPECT_EQ(1, tsSingle.count());
+  EXPECT_EQ(42, tsSingle.sum());
+
+  // Legacy Duration-based overload behaves the same.
+  BucketedTimeSeries<int64_t> tsLegacy(60, seconds(600));
+  tsLegacy.addValue(seconds(0), INT64_MAX, 3);
+  EXPECT_EQ(3, tsLegacy.count());
+  EXPECT_EQ(INT64_MAX, tsLegacy.sum());
+}
+
+// MultiLevelTimeSeries goes through the same val * times product in its own
+// addValue wrapper before caching and flushing into the levels.
+TEST(MultiLevelTimeSeries, AddValueLargeTimesSaturates) {
+  using MLTS = folly::MultiLevelTimeSeries<int64_t>;
+  MLTS mlts(60, {seconds(600)});
+
+  mlts.addValue(seconds(0), INT64_MAX, 3);
+  mlts.flush();
+
+  EXPECT_EQ(3, mlts.getLevel(0).count());
+  EXPECT_EQ(INT64_MAX, mlts.getLevel(0).sum());
+
+  MLTS mltsNeg(60, {seconds(600)});
+  mltsNeg.addValue(seconds(0), INT64_MIN, 2);
+  mltsNeg.flush();
+
+  EXPECT_EQ(2, mltsNeg.getLevel(0).count());
+  EXPECT_EQ(INT64_MIN, mltsNeg.getLevel(0).sum());
+}
+
+// The helper itself, including the boundary cases the wrappers can hit.
+TEST(BucketDetail, SaturatingMultiply) {
+  EXPECT_EQ(0, folly::detail::saturatingMultiply(int64_t(5), 0));
+  EXPECT_EQ(0, folly::detail::saturatingMultiply(int64_t(0), 100));
+  EXPECT_EQ(15, folly::detail::saturatingMultiply(int64_t(5), 3));
+  EXPECT_EQ(INT64_MAX, folly::detail::saturatingMultiply(int64_t(5), UINT64_MAX));
+  EXPECT_EQ(
+      INT64_MIN, folly::detail::saturatingMultiply(int64_t(-5), UINT64_MAX));
+  EXPECT_EQ(INT64_MIN, folly::detail::saturatingMultiply(INT64_MIN, 2));
+  // -1 * 2^63 is exactly representable.
+  EXPECT_EQ(
+      INT64_MIN,
+      folly::detail::saturatingMultiply(int64_t(-1), uint64_t(1) << 63));
+  // 64-bit unsigned: the product overflows even without a wide count.
+  EXPECT_EQ(
+      UINT64_MAX, folly::detail::saturatingMultiply(uint64_t(1) << 63, 4));
+  // Narrow signed type with a count that exceeds its range.
+  EXPECT_EQ(INT8_MAX, folly::detail::saturatingMultiply(int8_t(3), 1000));
+  EXPECT_EQ(INT8_MIN, folly::detail::saturatingMultiply(int8_t(-3), 1000));
+  // Narrow unsigned type.
+  EXPECT_EQ(UINT8_MAX, folly::detail::saturatingMultiply(uint8_t(3), 1000));
+  // Floating point keeps plain multiply semantics.
+  EXPECT_EQ(6.0, folly::detail::saturatingMultiply(2.0, 3));
+}
