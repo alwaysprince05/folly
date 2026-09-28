@@ -87,7 +87,9 @@ bool BucketedTimeSeries<VT, CT>::addValue(TimePoint now, const ValueType& val) {
 template <typename VT, typename CT>
 bool BucketedTimeSeries<VT, CT>::addValue(
     TimePoint now, const ValueType& val, uint64_t times) {
-  return addValueAggregated(now, val * ValueType(times), times);
+  // Compute the aggregate sum without overflowing: times may be any uint64_t,
+  // and val * ValueType(times) would overflow for large counts.
+  return addValueAggregated(now, detail::saturatingMultiply(val, times), times);
 }
 
 template <typename VT, typename CT>

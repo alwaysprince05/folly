@@ -102,7 +102,9 @@ void MultiLevelTimeSeries<VT, CT>::addValue(
 template <typename VT, typename CT>
 void MultiLevelTimeSeries<VT, CT>::addValue(
     TimePoint now, const ValueType& val, uint64_t times) {
-  addValueAggregated(now, val * ValueType(times), times);
+  // Compute the aggregate sum without overflowing: times may be any uint64_t,
+  // and val * ValueType(times) would overflow for large counts.
+  addValueAggregated(now, detail::saturatingMultiply(val, times), times);
 }
 
 template <typename VT, typename CT>
