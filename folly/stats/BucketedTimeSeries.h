@@ -441,7 +441,8 @@ class BucketedTimeSeries {
     return addValueAggregated(TimePoint(now), val, 1);
   }
   bool addValue(Duration now, const ValueType& val, uint64_t times) {
-    return addValueAggregated(TimePoint(now), val * ValueType(times), times);
+    return addValueAggregated(
+        TimePoint(now), detail::saturatingMultiply(val, times), times);
   }
   bool addValueAggregated(
       Duration now, const ValueType& total, uint64_t nsamples) {
